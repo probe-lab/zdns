@@ -212,6 +212,17 @@ func mockReferral(zone, nsName, glueIP string) *dns.Msg {
 	return resp
 }
 
+// mockGluelessReferral responds with a delegation of zone to nsName without glue, as a TLD server does when nsName
+// is outside the zone it serves
+func mockGluelessReferral(zone, nsName string) *dns.Msg {
+	resp := new(dns.Msg)
+	resp.Ns = append(resp.Ns, &dns.NS{
+		Hdr: dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300},
+		Ns:  dns.Fqdn(nsName),
+	})
+	return resp
+}
+
 // mockNXDomain is the response a handler should give for a name it doesn't know about
 func mockNXDomain() *dns.Msg {
 	resp := new(dns.Msg)

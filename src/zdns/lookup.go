@@ -950,16 +950,8 @@ func (r *Resolver) cachedLookup(ctx context.Context, q Question, nameServer *Nam
 				r.verboseLog(depth+2, "Can't parse name to authority properly. name: ", name, ", layer: ", layer)
 				return &SingleQueryResult{}, isCached, StatusAuthFail, trace, nil
 			}
-			r.verboseLog(depth+2, "Cache auth check for ", authName)
-			// TODO - this will need to be changed for AllNameServers
-			cachedResult, ok = r.cache.GetCachedAuthority(authName, nil, depth+2)
-			if ok {
-				r.verboseLog(depth+2, "Cache auth hit for ", authName)
-				// only want to return if we actually have additionals and authorities from the cache for the caller
-				if len(cachedResult.Additionals) > 0 && len(cachedResult.Authorities) > 0 {
-					return cachedResult, true, StatusNoError, trace, nil
-				}
-				// unsuccessful in retrieving from the cache, we'll continue to the wire
+			if cachedResult, ok = r.closestCachedDelegation(name, layer, depth+2); ok {
+				return cachedResult, true, StatusNoError, trace, nil
 			}
 		}
 	}
@@ -1023,6 +1015,32 @@ func (r *Resolver) cachedLookup(ctx context.Context, q Question, nameServer *Nam
 	}
 
 	return result, isCached, status, trace, err
+}
+
+// closestCachedDelegation returns the cached referral for the deepest zone that contains name and is below layer.
+// Searching from the deepest zone up finds delegations that skip a label, such as a .uk server referring
+// example.co.uk directly because it is also authoritative for co.uk.
+// A referral without glue is used as well: it is cached as received, so asking the parent again would return the
+// same referral, and iterateOnAuthorities resolves the name server addresses.
+func (r *Resolver) closestCachedDelegation(name, layer string, depth int) (*SingleQueryResult, bool) {
+	zone := name
+	for {
+		if beneath, _ := nameIsBeneath(zone, layer); !beneath || zone == layer {
+			return nil, false
+		}
+		r.verboseLog(depth, "Cache auth check for ", zone)
+		// TODO - this will need to be changed for AllNameServers
+		cachedResult, ok := r.cache.GetCachedAuthority(zone, nil, depth)
+		if ok && len(cachedResult.Authorities) > 0 {
+			r.verboseLog(depth, "Cache auth hit for ", zone)
+			return cachedResult, true
+		}
+		_, parent, found := strings.Cut(zone, ".")
+		if !found {
+			return nil, false
+		}
+		zone = parent
+	}
 }
 
 func (r *Resolver) performWireLookup(ctx context.Context, connInfo *ConnectionInfo, q Question, nameServer *NameServer, recursive bool, depth int, useEDNS bool) (*SingleQueryResult, *dns.Msg, Status, error) {

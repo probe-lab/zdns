@@ -202,3 +202,86 @@ func TestIterativeLookupsQueryRootOncePerGTLD(t *testing.T) {
 		require.Len(t, mn.Queries(mockRootAddr), 2)
 	})
 }
+
+const (
+	mockNetTLDIP      = "127.0.0.30"
+	mockDNSHostIP     = "127.0.0.31"
+	mockUKTLDIP       = "127.0.0.32"
+	mockExampleUKIP   = "127.0.0.33"
+	mockNetTLDAddr    = mockNetTLDIP + ":53"
+	mockDNSHostAddr   = mockDNSHostIP + ":53"
+	mockUKTLDAddr     = mockUKTLDIP + ":53"
+	mockExampleUKAddr = mockExampleUKIP + ":53"
+)
+
+// addMockDelegationHierarchy registers delegations that the cache has to handle beyond the one-referral-per-label
+// case:
+//   - .com delegates glueless.com to ns1.dnshost.net without glue, since the name server is outside .com
+//   - .uk delegates example.co.uk directly, because the .uk servers are also authoritative for co.uk
+func addMockDelegationHierarchy(mn *mockNetwork) {
+	mn.AddServer(mockRootAddr, func(_ string, req *dns.Msg) *dns.Msg {
+		name := strings.ToLower(req.Question[0].Name)
+		switch {
+		case strings.HasSuffix(name, ".com."):
+			return mockReferral("com", "a.gtld-servers.net", mockGTLDIP)
+		case strings.HasSuffix(name, ".net."):
+			return mockReferral("net", "b.gtld-servers.net", mockNetTLDIP)
+		case strings.HasSuffix(name, ".uk."):
+			return mockReferral("uk", "nsa.nic.uk", mockUKTLDIP)
+		}
+		return mockNXDomain()
+	})
+	mn.AddServer(mockGTLDAddr, func(_ string, req *dns.Msg) *dns.Msg {
+		if strings.HasSuffix(strings.ToLower(req.Question[0].Name), "glueless.com.") {
+			return mockGluelessReferral("glueless.com", "ns1.dnshost.net")
+		}
+		return mockNXDomain()
+	})
+	mn.AddServer(mockNetTLDAddr, func(_ string, req *dns.Msg) *dns.Msg {
+		if strings.HasSuffix(strings.ToLower(req.Question[0].Name), "dnshost.net.") {
+			return mockReferral("dnshost.net", "ns1.dnshost.net", mockDNSHostIP)
+		}
+		return mockNXDomain()
+	})
+	mn.AddServer(mockDNSHostAddr, func(_ string, req *dns.Msg) *dns.Msg {
+		if strings.EqualFold(req.Question[0].Name, "ns1.dnshost.net.") {
+			return mockAnswerA(req, mockDNSHostIP)
+		}
+		return mockAnswerA(req, mockExampleAnswer)
+	})
+	mn.AddServer(mockUKTLDAddr, func(_ string, req *dns.Msg) *dns.Msg {
+		if strings.HasSuffix(strings.ToLower(req.Question[0].Name), "example.co.uk.") {
+			return mockReferral("example.co.uk", "ns1.example.co.uk", mockExampleUKIP)
+		}
+		return mockNXDomain()
+	})
+	mn.AddServer(mockExampleUKAddr, func(_ string, req *dns.Msg) *dns.Msg {
+		return mockAnswerA(req, mockExampleAnswer)
+	})
+}
+
+func TestIterativeLookupsReuseCachedDelegations(t *testing.T) {
+	t.Run("delegation without glue", func(t *testing.T) {
+		mn := newMockNetwork()
+		addMockDelegationHierarchy(mn)
+		r := newMockIterativeResolver(t, mn)
+
+		lookupAllIteratively(t, r, "glueless.com", "www.glueless.com", "mail.glueless.com")
+
+		require.Len(t, mn.Queries(mockGTLDAddr), 1, ".com servers should only be asked about glueless.com once")
+		require.Len(t, mn.Queries(mockNetTLDAddr), 1, ".net servers should only be asked about dnshost.net once")
+		require.Len(t, mn.Queries(mockDNSHostAddr), 4, "the address of ns1.dnshost.net once, then each name")
+	})
+
+	t.Run("delegation more than one label below the parent zone", func(t *testing.T) {
+		mn := newMockNetwork()
+		addMockDelegationHierarchy(mn)
+		r := newMockIterativeResolver(t, mn)
+
+		lookupAllIteratively(t, r, "example.co.uk", "www.example.co.uk", "mail.example.co.uk")
+
+		require.Len(t, mn.Queries(mockRootAddr), 1, "root servers should only be asked about .uk once")
+		require.Len(t, mn.Queries(mockUKTLDAddr), 1, ".uk servers should only be asked about example.co.uk once")
+		require.Len(t, mn.Queries(mockExampleUKAddr), 3)
+	})
+}
